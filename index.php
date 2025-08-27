@@ -4,7 +4,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OCR Voucher – Full (Local→CDN Fallback)</title>
+<title>OCR Voucher – CDN Only</title>
+<!-- Library OCR dari CDN -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
 :root{--bg:#f7fafc;--card:#fff;--txt:#0f172a;--muted:#64748b;--border:#e5e7eb;--border2:#d1d5db;--acc:#16a34a;--acc2:#0ea5e9;--warn:#f59e0b;--danger:#ef4444;--shadow:0 10px 30px rgba(2,6,23,.08);--br:16px;--pad:14px}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#f8fafc,#f1f5f9);color:var(--txt);font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial}
@@ -48,8 +50,8 @@ select{border:1px solid var(--border2);border-radius:10px;padding:8px 10px;backg
 <div class="wrap">
   <div class="top">
     <div>
-      <h1>OCR Voucher – Full</h1>
-      <div class="muted">Local→CDN fallback · Upload rapi · 1 tombol “Mulai OCR” · Hasil Gabungan</div>
+      <h1>OCR Voucher – CDN Only</h1>
+      <div class="muted">jsDelivr + tessdata (eng / eng+ind) · Upload rapi · 1 tombol OCR · Hasil gabungan</div>
     </div>
     <div class="prog">
       <div class="bar"><span id="bar"></span></div>
@@ -69,14 +71,13 @@ select{border:1px solid var(--border2);border-radius:10px;padding:8px 10px;backg
         </div>
       </label>
 
-      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;align-items:center">
         <label>Bahasa:
           <select id="lang">
             <option value="eng" selected>eng (stabil)</option>
             <option value="eng+ind">eng+ind</option>
           </select>
         </label>
-        <button class="btn" id="check" type="button">Cek Aset Lokal</button>
         <button class="btn primary" id="run" type="button">Mulai OCR</button>
         <button class="btn" id="save" type="button">Simpan Ingatan</button>
         <button class="btn warn" id="load" type="button">Muat Ingatan</button>
@@ -114,136 +115,52 @@ select{border:1px solid var(--border2);border-radius:10px;padding:8px 10px;backg
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-/* ===== Global error to log ===== */
-window.addEventListener('error', e => {
-  document.getElementById('log').textContent += 'JS ERROR: ' + (e.message || e.error) + '\n';
-});
+/* ===== Helpers ===== */
+const el={bar:document.getElementById('bar'),status:document.getElementById('status'),log:document.getElementById('log'),
+  drop:document.getElementById('drop'),file:document.getElementById('file'),lang:document.getElementById('lang'),
+  run:document.getElementById('run'),save:document.getElementById('save'),load:document.getElementById('load'),clear:document.getElementById('clear'),
+  list:document.getElementById('list'),combined:document.getElementById('combined'),copyCombined:document.getElementById('copyCombined'),fmt:document.getElementById('fmt')};
+const state={items:[]};
+function logln(s){el.log.textContent+=s+'\n'; el.log.scrollTop=el.log.scrollHeight;}
+function setStatus(s){el.status.textContent=s; logln(s);}
+function setProgress(p){el.bar.style.width=Math.max(0,Math.min(100,p))+'%';}
+function esc(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]||c));}
 
-/* ===== Elements & State ===== */
-const el = {
-  bar:document.getElementById('bar'), status:document.getElementById('status'), log:document.getElementById('log'),
-  drop:document.getElementById('drop'), file:document.getElementById('file'),
-  lang:document.getElementById('lang'),
-  check:document.getElementById('check'), run:document.getElementById('run'),
-  save:document.getElementById('save'), load:document.getElementById('load'), clear:document.getElementById('clear'),
-  list:document.getElementById('list'), combined:document.getElementById('combined'), copyCombined:document.getElementById('copyCombined'), fmt:document.getElementById('fmt')
+/* ===== Upload UI ===== */
+el.drop.addEventListener('click',()=>el.file.click());
+['dragenter','dragover'].forEach(ev=>el.drop.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();el.drop.classList.add('drag');}));
+['dragleave','drop'].forEach(ev=>el.drop.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();el.drop.classList.remove('drag');}));
+el.drop.addEventListener('drop',e=>addFiles(e.dataTransfer.files));
+el.file.addEventListener('change',e=>addFiles(e.target.files));
+function addFiles(fs){Array.from(fs||[]).forEach(f=>{if(!f.type.startsWith('image/'))return;
+  const id='id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
+  const url=URL.createObjectURL(f);
+  state.items.push({id,fileName:f.name,url,kode:'',nominal:'',raw:''});
+}); render(); updateCombined();}
+
+/* ===== Tesseract Worker (CDN) ===== */
+const CDN={
+  worker:'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
+  core:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5/dist/tesseract-core.wasm.js',
+  lang:'https://tessdata.projectnaptha.com/5'
 };
-const state = { items:[] };
-function logln(s){ el.log.textContent += s + '\n'; el.log.scrollTop = el.log.scrollHeight; }
-function setStatus(s){ el.status.textContent = s; logln(s); }
-function setProgress(pct){ el.bar.style.width = Math.max(0,Math.min(100,pct)) + '%'; }
-function esc(s){ return (s||'').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c] || c)); }
-
-/* ===== Upload UI tidy ===== */
-el.drop.addEventListener('click', ()=> el.file.click());
-['dragenter','dragover'].forEach(ev=> el.drop.addEventListener(ev, e=>{e.preventDefault();e.stopPropagation();el.drop.classList.add('drag');}));
-['dragleave','drop'].forEach(ev=> el.drop.addEventListener(ev, e=>{e.preventDefault();e.stopPropagation();el.drop.classList.remove('drag');}));
-el.drop.addEventListener('drop', e=> addFiles(e.dataTransfer.files));
-el.file.addEventListener('change', e=> addFiles(e.target.files));
-function addFiles(fs){
-  Array.from(fs||[]).forEach(f=>{
-    if(!f.type.startsWith('image/')) return;
-    const id='id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
-    const url=URL.createObjectURL(f);
-    state.items.push({id,fileName:f.name,url,kode:'',nominal:'',raw:'',ms:0});
-  });
-  render(); updateCombined();
-}
-
-/* ===== Dynamic loader for tesseract.min.js (local→CDN) ===== */
-async function loadScript(src){
-  return new Promise((res, rej) => { const s=document.createElement('script'); s.src=src; s.onload=()=>res(true); s.onerror=()=>rej(new Error('load fail '+src)); document.head.appendChild(s); });
-}
-async function ensureTesseractLoaded(){
-  if (window.Tesseract) { logln('Tesseract lib: sudah tersedia'); return true; }
-  try { await loadScript('/tess/tesseract.min.js'); logln('Tesseract lib: lokal (/tess/tesseract.min.js)'); return true; }
-  catch(e1){ logln('Tesseract lokal gagal: '+e1); }
-  try { await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'); logln('Tesseract lib: CDN'); return true; }
-  catch(e2){ logln('Tesseract CDN gagal: '+e2); }
-  setStatus('❌ Tidak bisa memuat tesseract.min.js dari lokal maupun CDN.');
-  return false;
-}
-
-/* ===== Local + CDN paths (auto-resolve) ===== */
-const PATHS = {
-  local: {
-    worker: '/tess/worker.min.js',
-    core_js: ['/tess/tesseract-core-simd.wasm.js','/tess/tesseract-core.wasm.js'],
-    core_wasm:['/tess/tesseract-core-simd.wasm.wasm','/tess/tesseract-core.wasm.wasm'],
-    lang_dir:'/tess'
-  },
-  cdn: {
-    worker:  'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
-    core_js: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5/dist/tesseract-core.wasm.js',
-    lang_dir:'https://tessdata.projectnaptha.com/5'
-  }
-};
-async function exists(url){
-  try { const r=await fetch(url,{method:'HEAD',cache:'no-store'}); return r.ok; } catch { return false; }
-}
-async function resolvePaths(lang){
-  // worker: local→CDN
-  const workerPath = (await exists(PATHS.local.worker)) ? PATHS.local.worker : PATHS.cdn.worker;
-
-  // core: cari pasangan lokal (js+wasm); kalau tak ada → CDN JS (otomatis unduh WASM CDN)
-  let corePath = null;
-  for (let i=0;i<PATHS.local.core_js.length;i++){
-    const js=PATHS.local.core_js[i], wasm=PATHS.local.core_wasm[i];
-    if (await exists(js) && await exists(wasm)) { corePath = js; break; }
-  }
-  if (!corePath) corePath = PATHS.cdn.core_js;
-
-  // lang: cek local eng (+ind jika perlu); jika kurang → CDN
-  const need=[PATHS.local.lang_dir+'/eng.traineddata.gz'];
-  if ((lang||'eng').includes('+')) need.push(PATHS.local.lang_dir+'/ind.traineddata.gz');
-  let localLangOk=true; for(const u of need){ if(!(await exists(u))){ localLangOk=false; break; } }
-  const langPath = localLangOk ? PATHS.local.lang_dir : PATHS.cdn.lang_dir;
-
-  return {workerPath, corePath, langPath};
-}
-
-/* ===== "Cek Aset Lokal" – tampilkan path yang akan dipakai ===== */
-async function checkAssets(){
-  const langSel = el.lang.value || 'eng';
-  const {workerPath, corePath, langPath} = await resolvePaths(langSel);
-  el.log.textContent = '';
-  el.log.textContent += `worker: ${workerPath}\n`;
-  el.log.textContent += `core:   ${corePath}\n`;
-  el.log.textContent += `lang:   ${langPath}\n`;
-  setStatus('OK. Sistem akan memakai path di atas saat OCR.');
-}
-
-/* ===== Engine (pakai path hasil resolve; timeout init) ===== */
-const Engine = {
-  worker:null, lang:null, paths:null,
+const Engine={
+  worker:null,
   async init(lang){
     setStatus('Menyiapkan engine OCR…');
-    const okLib = await ensureTesseractLoaded();
-    if(!okLib) throw new Error('tesseract.min.js tidak termuat');
-
-    this.paths = await resolvePaths(lang);
-    const timeoutMs = 15000; let tm;
-    const timed = new Promise((_,rej)=>{ tm=setTimeout(()=>rej(new Error('Init timeout. Cek jaringan/MIME .wasm.')), timeoutMs); });
-
-    const start = (async ()=>{
-      this.worker = await Tesseract.createWorker({
-        workerPath: this.paths.workerPath,
-        corePath:   this.paths.corePath,
-        langPath:   this.paths.langPath,
-        logger: m => { if (m && m.status) logln(`[${m.status}] ${m.progress!=null?(m.progress*100|0)+'%':''}`); }
-      });
-      await this.worker.loadLanguage(lang);
-      await this.worker.initialize(lang);
-      await this.worker.setParameters({ user_defined_dpi:'300', preserve_interword_spaces:'1', tessedit_pageseg_mode:'6' });
-      this.lang=lang;
-      const src = (x)=> x.includes('http')?'CDN':'lokal';
-      setStatus(`Engine siap (worker=${src(this.paths.workerPath)}, core=${src(this.paths.corePath)}, lang=${src(this.paths.langPath)})`);
-    })();
-
-    await Promise.race([start, timed]).finally(()=>clearTimeout(tm));
+    this.worker=await Tesseract.createWorker({
+      workerPath:CDN.worker,
+      corePath:CDN.core,
+      langPath:CDN.lang,
+      logger:m=>{ if(m&&m.status){ logln(`[${m.status}] ${m.progress!=null?(m.progress*100|0)+'%':''}`); } }
+    });
+    await this.worker.loadLanguage(lang);
+    await this.worker.initialize(lang);
+    await this.worker.setParameters({user_defined_dpi:'300',preserve_interword_spaces:'1',tessedit_pageseg_mode:'6'});
+    setStatus('Engine siap (CDN).');
   },
   async ocr(img, params){ if(params) await this.worker.setParameters(params); return await this.worker.recognize(img); },
-  async end(){ if(this.worker){ try{await this.worker.terminate();}catch{} } this.worker=null; this.lang=null; }
+  async end(){ if(this.worker){ try{await this.worker.terminate();}catch{} } this.worker=null; }
 };
 
 /* ===== Preprocess (upscale + grayscale + contrast) ===== */
@@ -257,21 +174,21 @@ function preprocessCanvas(img){
   ctx.putImageData(id,0,0); return cv;
 }
 
-/* ===== Ekstraksi sesuai aturanmu ===== */
+/* ===== Ekstraksi aturanmu ===== */
 function extractFields(fullText){
-  const txt = fullText.replace(/\r/g,'\n').split('\n').map(s=>s.replace(/\s+/g,' ').trim()).filter(Boolean).join(' ');
-  let kode=''; const mK=txt.match(/kode\s*voucher\s+([A-Z0-9\-]+)(?=(?:.*?(valid\s*until|berlaku\s*sampai))|[\s]|$)/i);
-  if(mK) kode=mK[1].toUpperCase();
-  let nominal=''; const mN=txt.match(/\b(?:Rp|IDR)\s*([0-9][0-9\.\,]*)/i);
-  if(mN) nominal='Rp '+mN[1];
+  const txt=fullText.replace(/\r/g,'\n').split('\n').map(s=>s.replace(/\s+/g,' ').trim()).filter(Boolean).join(' ');
+  // 1 kata setelah "Kode Voucher" sampai sebelum "valid until/berlaku sampai"
+  let kode=''; const mK=txt.match(/kode\s*voucher\s+([A-Z0-9\-]+)(?=(?:.*?(valid\s*until|berlaku\s*sampai))|[\s]|$)/i); if(mK) kode=mK[1].toUpperCase();
+  // 1 kata setelah "Rp/IDR"
+  let nominal=''; const mN=txt.match(/\b(?:Rp|IDR)\s*([0-9][0-9\.\,]*)/i); if(mN) nominal='Rp '+mN[1];
   return {kode,nominal};
 }
 
-/* ===== OCR run ===== */
+/* ===== Run OCR ===== */
 async function run(){
   if(!state.items.length){ alert('Belum ada gambar'); return; }
   setProgress(0); el.log.textContent='';
-  try{ await Engine.init(el.lang.value || 'eng'); }catch(e){ setStatus('Gagal init: '+e.message); return; }
+  try{ await Engine.init(el.lang.value||'eng'); }catch(e){ setStatus('Gagal init: '+(e.message||e)); return; }
 
   for(let i=0;i<state.items.length;i++){
     const it=state.items[i]; setStatus('Memproses: '+(it.fileName||it.id));
@@ -279,23 +196,46 @@ async function run(){
     const cv=preprocessCanvas(img);
     try{
       const r=await Engine.ocr(cv,{tessedit_pageseg_mode:'6'});
-      it.raw=r.data.text||''; const f=extractFields(it.raw); it.kode=f.kode; it.nominal=f.nominal;
+      it.raw=r.data.text||'';
+      const f=extractFields(it.raw); it.kode=f.kode; it.nominal=f.nominal;
     }catch(e){ it.raw='(gagal OCR) '+e; }
     render(); updateCombined(); setProgress(((i+1)/state.items.length)*100|0);
   }
   setStatus('Selesai.');
 }
 
-/* ===== Render List & Combined ===== */
+/* ===== Render per item (klik-untuk-copy) ===== */
+function copyToClipboard(text){ return navigator.clipboard.writeText(text).then(()=>true).catch(()=>false); }
+function clickableSpan(text){ const t=esc(text||''); return `<span class="copybox mono" data-copy="${esc(text||'')}">${t}<div class="tooltip">Tersalin!</div></span>`; }
 function card(it){return `
   <div class="item">
     <img class="thumb" src="${it.url||''}" alt="">
     <div class="kv"><div class="k">Nama</div><div class="v mono">${esc(it.fileName||'(tersimpan)')}</div></div>
-    <div class="kv"><div class="k">Kode</div><div class="v mono">${esc(it.kode||'')}</div></div>
-    <div class="kv"><div class="k">Nominal</div><div class="v mono">${esc(it.nominal||'')}</div></div>
+    <div class="kv"><div class="k">Kode</div><div class="v">${clickableSpan(it.kode||'')}</div></div>
+    <div class="kv"><div class="k">Nominal</div><div class="v">${clickableSpan(it.nominal||'')}</div></div>
     <details style="margin-top:6px"><summary class="small">Teks OCR</summary><div class="small mono">${esc(it.raw||'')}</div></details>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button class="btn" data-btncopy="${esc((it.kode||'')+' '+(it.nominal||''))}">Copy Kode+Nominal</button>
+    </div>
   </div>`;}
-function render(){ el.list.innerHTML = state.items.length? state.items.map(card).join('') : '<div class="muted">Belum ada data.</div>'; }
+function render(){
+  el.list.innerHTML = state.items.length? state.items.map(card).join('') : '<div class="muted">Belum ada data.</div>';
+  // Delegasi: klik-untuk-copy
+  el.list.querySelectorAll('.copybox').forEach(node=>{
+    node.addEventListener('click', async ()=>{
+      const ok=await copyToClipboard(node.getAttribute('data-copy')||'');
+      if(ok){ node.classList.add('copied'); setTimeout(()=>node.classList.remove('copied'),650); }
+    });
+  });
+  el.list.querySelectorAll('[data-btncopy]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const ok=await copyToClipboard(btn.getAttribute('data-btncopy')||'');
+      if(ok){ btn.textContent='Tersalin!'; setTimeout(()=>btn.textContent='Copy Kode+Nominal',700); }
+    });
+  });
+}
+
+/* ===== Hasil gabungan ===== */
 function buildCombined(){
   const rows=state.items.map(it=>({kode:it.kode||'', nominal:it.nominal||'', filename:it.fileName||''}));
   const fmt=el.fmt.value;
@@ -308,15 +248,17 @@ function buildCombined(){
   }
   return rows.map(r=>`${r.kode} | ${r.nominal} | ${r.filename}`).join('\n');
 }
-async function copyText(s){ try{ await navigator.clipboard.writeText(s); return true; }catch{ return false; } }
 function updateCombined(){
   const text=buildCombined()||'(kosong)';
   el.combined.textContent=text;
   const tip=document.createElement('div'); tip.className='tooltip'; tip.textContent='Tersalin!'; el.combined.appendChild(tip);
 }
+el.fmt.addEventListener('change', updateCombined);
+el.combined.addEventListener('click', async ()=>{ const t=buildCombined(); if(await copyToClipboard(t)){ el.combined.classList.add('copied'); setTimeout(()=>el.combined.classList.remove('copied'),650); }});
+el.copyCombined.addEventListener('click', async ()=>{ const t=buildCombined(); if(await copyToClipboard(t)){ el.combined.classList.add('copied'); setTimeout(()=>el.combined.classList.remove('copied'),650); }});
 
-/* ===== IndexedDB Memory ===== */
-const DB='ocr_full_mem', STORE='items'; let idb;
+/* ===== IndexedDB (Simpan/Muat/Clear) ===== */
+const DB='ocr_cdn_mem', STORE='items'; let idb;
 function idbOpen(){return new Promise((res,rej)=>{const r=indexedDB.open(DB,1);
   r.onupgradeneeded=e=>{const db=e.target.result;if(!db.objectStoreNames.contains(STORE))db.createObjectStore(STORE,{keyPath:'id'});};
   r.onsuccess=e=>{idb=e.target.result;res();}; r.onerror=e=>rej(e.target.error);});}
@@ -326,25 +268,15 @@ async function idbClr(){await idbOpen();return new Promise((res,rej)=>{const tx=
 async function saveMem(){ for(const it of state.items){ await idbPut({id:it.id,fileName:it.fileName,url:it.url,raw:it.raw||'',kode:it.kode||'',nominal:it.nominal||''}); } setStatus('Tersimpan.'); }
 async function loadMem(){ const rows=await idbAll(); state.items.push(...rows.map(r=>({id:r.id,fileName:r.fileName,url:r.url,raw:r.raw,kode:r.kode,nominal:r.nominal}))); render(); updateCombined(); setStatus('Dimuat '+rows.length+' item.'); }
 async function clearMem(){ if(!confirm('Hapus semua ingatan?'))return; await idbClr(); state.items=[]; render(); updateCombined(); setProgress(0); setStatus('Bersih.'); }
-
-/* ===== Bind Buttons ===== */
-el.check.addEventListener('click', checkAssets);
-el.run.addEventListener('click', run);
 el.save.addEventListener('click', saveMem);
 el.load.addEventListener('click', loadMem);
 el.clear.addEventListener('click', clearMem);
-el.combined.addEventListener('click', async ()=>{ const t=buildCombined(); if(await copyText(t)){ el.combined.classList.add('copied'); setTimeout(()=>el.combined.classList.remove('copied'),650);} });
-el.copyCombined.addEventListener('click', async ()=>{ const t=buildCombined(); if(await copyText(t)){ el.combined.classList.add('copied'); setTimeout(()=>el.combined.classList.remove('copied'),650);} });
-el.fmt.addEventListener('change', updateCombined);
+
+/* ===== Bind OCR ===== */
+el.run.addEventListener('click', run);
 
 /* ===== Init ===== */
-setStatus('Siap. Klik “Cek Aset Lokal”, tambah gambar, lalu “Mulai OCR”.');
-
-/* ===== (Opsional) .htaccess MIME untuk full offline =====
-AddType application/wasm .wasm
-AddType application/javascript .js
-AddType application/gzip .gz
-*/
+setStatus('Siap. Tambah gambar → pilih Bahasa → “Mulai OCR”.');
 }); // DOMContentLoaded
 </script>
 </body>
